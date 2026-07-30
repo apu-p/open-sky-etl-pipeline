@@ -24,6 +24,7 @@ from etl.extract.nasa import extract_donki as fetch_donki
 from etl.extract.nasa import extract_neows as fetch_neows
 from etl.load import postgres_loader as loader
 from etl.transform.space_weather import convert_donki, convert_neows
+from etl.utils.metrics import CallFailed
 
 
 @dag(
@@ -43,9 +44,15 @@ def space_weather_dag():
     @task(retries=3, retry_exponential_backoff=True)
     def extract_donki(run_id: str) -> list[dict]:
         out = []
-        for event_type in config.DONKI_EVENT_TYPES:
-            json_path, metrics = fetch_donki(event_type, pipeline_run_id=run_id)
-            out.append({"json_path": json_path, "metrics": metrics, "event_type": event_type})
+        try:
+            for event_type in config.DONKI_EVENT_TYPES:
+                json_path, metrics = fetch_donki(event_type, pipeline_run_id=run_id)
+                out.append({"json_path": json_path, "metrics": metrics, "event_type": event_type})
+        except CallFailed as exc:
+            # Record the failed call (plus any successes so far) before failing
+            # the task — api_call_log must reflect real failures (Section 5/12).
+            loader.log_call_metrics([e["metrics"] for e in out] + [exc.metrics.as_row()])
+            raise
         return out
 
     @task
@@ -71,7 +78,11 @@ def space_weather_dag():
     # --- NeoWs ---------------------------------------------------------------
     @task(retries=3, retry_exponential_backoff=True)
     def extract_neows(run_id: str) -> dict:
-        json_path, metrics = fetch_neows(pipeline_run_id=run_id)
+        try:
+            json_path, metrics = fetch_neows(pipeline_run_id=run_id)
+        except CallFailed as exc:
+            loader.log_call_metrics([exc.metrics.as_row()])  # record the failure
+            raise
         return {"json_path": json_path, "metrics": metrics}
 
     @task
@@ -100,7 +111,9 @@ def space_weather_dag():
     # --- Audit (one per DAG) -------------------------------------------------
     @task(trigger_rule="all_done")
     def run_audit_checks(run_id: str, donki_conv: dict, neows_conv: dict) -> None:
-        drift = {**donki_conv.get("raw", {}), **neows_conv.get("raw", {})}
+        # Either convert output is None if its upstream failed (all_done still
+        # fires this). Guard so the SQL checks (absence detection etc.) run.
+        drift = {**(donki_conv or {}).get("raw", {}), **(neows_conv or {}).get("raw", {})}
         findings = run_all_checks(run_id, drift)
         loader.load_audit_findings(findings)
 

@@ -21,6 +21,7 @@ from etl.audit.checks import run_all_checks
 from etl.extract.open_meteo import extract_open_meteo as fetch_open_meteo
 from etl.load import postgres_loader as loader
 from etl.transform.weather import convert_weather
+from etl.utils.metrics import CallFailed
 
 
 @dag(
@@ -40,9 +41,19 @@ def weather_dag():
     def extract_open_meteo(run_id: str) -> list[dict]:
         # Writes raw JSON files (untouched) and returns [{json_path, metrics}].
         out = []
-        for loc in config.LOCATIONS:
-            json_path, metrics = fetch_open_meteo(loc, pipeline_run_id=run_id)
-            out.append({"json_path": json_path, "metrics": metrics})
+        try:
+            for loc in config.LOCATIONS:
+                json_path, metrics = fetch_open_meteo(loc, pipeline_run_id=run_id)
+                out.append({"json_path": json_path, "metrics": metrics})
+        except CallFailed as exc:
+            # A failed call must still land in api_call_log — success rate and
+            # the API-health audit (Section 5/12) depend on failures being
+            # recorded, not just successes. Log everything captured so far plus
+            # the failed attempt, then re-raise so the task fails (fail-fast)
+            # and Airflow retries/alerts. The downstream log_call_metrics task
+            # is skipped on this path, so it can't double-log.
+            loader.log_call_metrics([e["metrics"] for e in out] + [exc.metrics.as_row()])
+            raise
         return out
 
     @task
@@ -66,7 +77,10 @@ def weather_dag():
 
     @task(trigger_rule="all_done")  # audit even if the load failed
     def run_audit_checks(run_id: str, converted: dict) -> None:
-        raw_paths = converted.get("raw_paths", [])
+        # converted is None if convert_to_flat_file failed (all_done still fires
+        # this task). Guard so the SQL checks — absence detection especially,
+        # which is the whole point when a load failed — still run.
+        raw_paths = (converted or {}).get("raw_paths", [])
         drift = {"open_meteo": raw_paths[0]} if raw_paths else {}
         findings = run_all_checks(run_id, drift)
         loader.load_audit_findings(findings)

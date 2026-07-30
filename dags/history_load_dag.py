@@ -29,6 +29,7 @@ from etl.load import postgres_loader as loader
 from etl.transform.space_weather import convert_donki, convert_neows
 from etl.transform.weather import convert_weather
 from etl.utils.logging import get_logger
+from etl.utils.metrics import CallFailed
 
 log = get_logger("dags.history_load")
 
@@ -51,8 +52,12 @@ def history_load_dag():
         start, end = config.backfill_range()
         # Archive endpoint: one call per location covers the whole range.
         for loc in config.LOCATIONS:
-            json_path, metrics = fetch_open_meteo(
-                loc, start_date=start, end_date=end, historical=True, pipeline_run_id=run_id)
+            try:
+                json_path, metrics = fetch_open_meteo(
+                    loc, start_date=start, end_date=end, historical=True, pipeline_run_id=run_id)
+            except CallFailed as exc:
+                loader.log_call_metrics([exc.metrics.as_row()])  # record the failed call
+                raise
             flat = convert_weather(json_path, historical=True)
             loader.copy_to_staging(flat, "weather")
             loader.log_call_metrics([metrics])
@@ -62,8 +67,12 @@ def history_load_dag():
         start, end = config.backfill_range()
         for event_type in config.DONKI_EVENT_TYPES:
             for ws, we in config.iter_windows(start, end, config.DONKI_WINDOW_DAYS):
-                json_path, metrics = fetch_donki(
-                    event_type, ws, we, historical=True, pipeline_run_id=run_id)
+                try:
+                    json_path, metrics = fetch_donki(
+                        event_type, ws, we, historical=True, pipeline_run_id=run_id)
+                except CallFailed as exc:
+                    loader.log_call_metrics([exc.metrics.as_row()])  # record the failed call
+                    raise
                 flat = convert_donki(json_path, event_type, historical=True)
                 loader.copy_to_staging(flat, "donki")
                 loader.log_call_metrics([metrics])
@@ -72,7 +81,11 @@ def history_load_dag():
     def backfill_neows(run_id: str) -> None:
         start, end = config.backfill_range()
         for ws, we in config.iter_windows(start, end, config.NEOWS_WINDOW_DAYS):
-            json_path, metrics = fetch_neows(ws, we, historical=True, pipeline_run_id=run_id)
+            try:
+                json_path, metrics = fetch_neows(ws, we, historical=True, pipeline_run_id=run_id)
+            except CallFailed as exc:
+                loader.log_call_metrics([exc.metrics.as_row()])  # record the failed call
+                raise
             flat = convert_neows(json_path, historical=True)
             loader.copy_to_staging(flat, "neows")
             loader.log_call_metrics([metrics])

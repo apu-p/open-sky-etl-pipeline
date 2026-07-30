@@ -134,7 +134,11 @@ open-sky-etl-pipeline/
 │   │                              # DDL) statements — Section 13, run once at init
 │   └── upserts/                  # INSERT ... ON CONFLICT .sql files, run via `psql -f`
 └── superset/
-    └── dashboard_export.json     # exported Superset dashboard definition
+    ├── superset_config.py         # SECRET_KEY, metadata DB, feature flags
+    └── README.md                  # one-time DB-connection setup + the per-chart
+                                    # SQL for all four dashboards; `dashboard_export.json`
+                                    # is not checked in — it's produced on demand via
+                                    # `superset export-dashboards` once dashboards are built
 ```
 
 No separate `tests/` directory — the extract/transform/load scripts themselves are run directly (e.g. `python -m etl.extract.open_meteo`) to verify behavior during development, rather than maintaining a parallel automated test suite.
@@ -209,6 +213,7 @@ Only step 2 is "the transform" in the traditional ETL sense (pure function, no I
 **API call metrics (observability transform)**
 - Wrap every extract function in a decorator/context manager that captures, per call: `source_name`, `response_time_ms`, `http_status_code`, `success`, `retry_count`, `records_returned`, `rate_limit_remaining` (parsed from response headers where the source provides them, e.g. NASA's `X-RateLimit-Remaining`), `called_at`
 - This runs independently of the domain transform logic (weather/DONKI/NeoWs) — it's metadata *about* the call, not the data itself — so it never blocks or fails the main pipeline if something's off
+- **Failed calls are recorded too, not just successes.** When an extract exhausts its retries the HTTP helper (`etl/utils/metrics.py`) raises `CallFailed`, which *carries* the partial `CallMetrics` (`success=False`, status code, latency). Each `extract_*` task catches `CallFailed`, writes that failed metric (plus any calls that already succeeded in the same task) to `api_call_log` via `log_call_metrics`, and only then re-raises so the task still fails fast and Airflow retries/alerts. This is essential: if only successful calls were logged, the per-source success rate (Dashboard 4) would be structurally pinned at ~100% and audit check #5 (`trend_api_success_rate`, Section 12) could never fire. The re-raise means the DAG's separate `log_call_metrics` task is skipped on the failure path, so a call is never double-logged.
 - Output feeds a dedicated `open_sky_logs.api_call_log` table (see Data Modeling below), which is what makes it possible to compare sources empirically instead of by published docs alone: actual observed latency, actual success rate, actual data-quality drift over time
 
 ## 6. Data Modeling
@@ -635,6 +640,10 @@ Per-source backfill window — **the same rolling 2-year window (today − 2 yea
 
 `history_load_dag` task shape, per source: a single `@task` loops the date windows in Python and calls the same `extract_*`/`convert_to_flat_file`/`copy_to_staging` functions the daily DAG uses per iteration, rather than generating ~180 individual Airflow tasks — Airflow's scheduler overhead per task isn't worth paying that many times for what's fundamentally one backfill job. `upsert_to_open_sky` still runs once at the end, over everything staged.
 
+**Window sizing is *inclusive* (implementation detail that matters for correctness).** A "30-day" DONKI window and a "7-day" NeoWs window mean 30 and 7 *inclusive* calendar days, so `config.iter_windows` yields `[ws, ws + window_days - 1]` (not `ws + window_days`). Getting this wrong by one day is not cosmetic: a 31-inclusive-day DONKI request exceeds DONKI's 30-day cap, which *truncates* to the last 30 days ending at `endDate` and thereby silently drops the window's first day — leaving a periodic 1-day gap right through a 2-year backfill. The daily windows (`etl/extract/nasa.py`) use the same `window_days - 1` convention so a scheduled pull can't be truncated either. Windows step by `we + 1 day`, so they stay contiguous with no gaps or overlaps; the natural-key upsert absorbs the deliberate day-of-overlap that daily runs produce against the previous day's data.
+
+Edge case handled in `config.backfill_range`: when `today − 5 days` lands on Feb 29 (leap year), `end.replace(year=end.year − 2)` would raise `ValueError` on the one calendar day the target year isn't a leap year, so the start clamps to Feb 28 instead of crashing the backfill trigger.
+
 **Rate-limit headroom:** DONKI's ~73 requests plus NeoWs's ~104 is **~177 combined NASA calls — well under NASA's 1000 req/hour cap** (Section 2), so `history_load_dag` fires them sequentially with no pacer or token-bucket at all; the backfill finishes in minutes, bounded by API latency rather than the rate limit. Keeping the window at 2 years is partly *why* there's no pacer to build — you wouldn't approach the cap until ~11 years of history, which is the point at which pacing would need reintroducing. The daily DAGs are nowhere near the cap either (~3–4 NASA calls/day).
 
 ```yaml
@@ -744,12 +753,13 @@ Postgres constraints (Section 6) validate single rows at insert time — they ca
 2. **Source schema drift** — does today's raw JSON have the same top-level keys as a saved reference sample? Since raw JSON is a file now, not a Postgres column (Section 5/6), this check reads the file directly rather than querying staging:
    ```python
    # reads the raw JSON file extract_* just wrote (same path passed to
-   # convert_to_flat_file), compares its top-level keys against a
-   # checked-in reference_schema/{source}.json
+   # convert_to_flat_file), compares its top-level keys against the
+   # reference_schema/{source}.json baseline
    latest_raw = json.load(open(json_file_path))
    missing = reference_keys - set(latest_raw.keys())
    added = set(latest_raw.keys()) - reference_keys
    ```
+   The reference baseline is **bootstrapped on first sighting**, not hand-checked-in: the first run for a source writes `reference_schema/{source}.json` from the observed keys and emits an `info` finding; every run after compares against it. These generated files are environment-specific and gitignored (only `reference_schema/README.md` is tracked). Trade-off: the very first run can't detect drift (it's establishing the baseline) — acceptable, since a genuinely breaking shape change also fails the fail-fast load loudly regardless.
 3. **Statistical/trend anomalies** — values valid per `CHECK` but out of line with recent history (current versions only — historized-out rows shouldn't skew the trailing average)
    ```sql
    -- flag a temp reading > 3 std-dev from the trailing 7-day mean for that location
@@ -808,6 +818,8 @@ Index: `(check_name, detected_at)` for the dashboard's trend view.
 ```
 
 `trigger_rule="all_done"` is deliberate — audits should run and report even when the load itself partially failed, since "the load failed" is exactly the kind of thing absence detection is meant to catch. A finding never fails the DAG; it's written and surfaced, not raised as an exception.
+
+Because `all_done` fires the task even when an upstream `convert`/`extract` task failed, the XCom it receives (the converted-file paths, used only to locate raw JSON for the schema-drift check) can be `None`. `run_audit_checks` guards for that (`(converted or {}).get(...)`) so a failed upstream degrades gracefully to "skip the file-based drift check, still run all the SQL checks" — rather than the audit task itself throwing `AttributeError` on `None` and never running the absence/consistency checks that matter most precisely when something upstream broke.
 
 **Dashboard integration:** Dashboard 4 (API Health & Reliability) gains a table panel — recent `audit_findings` sorted by severity and `detected_at` — turning the dashboard from "raw call metrics" into "raw metrics + the anomalies actually found in them."
 
