@@ -143,3 +143,7 @@ connects as the Postgres superuser after init.
   populated), since `staging.weather_raw` doesn't carry that column.
 - Schema-drift references self-bootstrap on first sight of a source (see
   `reference_schema/README.md`).
+
+## License
+
+Released under the [MIT License](LICENSE).
