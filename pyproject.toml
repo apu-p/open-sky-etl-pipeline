@@ -1,0 +1,17 @@
+[project]
+name = "open-sky-etl"
+version = "0.1.0"
+description = "Weather & Space ETL pipeline (Open-Meteo + NASA DONKI/NeoWs -> Postgres -> Superset)"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.32",
+    "pandas>=2.2",
+    "python-dotenv>=1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["etl"]

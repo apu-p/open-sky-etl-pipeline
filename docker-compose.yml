@@ -1,0 +1,145 @@
+# =============================================================================
+# open-sky-etl-pipeline — one command to bring up the whole local stack:
+#   Postgres (warehouse) + Airflow (LocalExecutor) + Superset.
+# Copy .env.example to .env first (see README). `docker compose up -d`.
+# =============================================================================
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.airflow
+  image: open-sky-airflow:latest
+  env_file: .env
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+    # Make the etl package importable and give it the shared data volume.
+    PYTHONPATH: /opt/airflow
+    REPO_ROOT: /opt/airflow
+    DATA_DIR: /opt/airflow/data
+    ETL_DSN: ${ETL_DSN}
+    NASA_API_KEY: ${NASA_API_KEY}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./etl:/opt/airflow/etl
+    - ./sql:/opt/airflow/sql
+    - ./reference_schema:/opt/airflow/reference_schema
+    - ./logs:/opt/airflow/logs
+    - etl_data:/opt/airflow/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  # --- Warehouse + Airflow metadata DB --------------------------------------
+  postgres:
+    image: postgres:16
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./sql:/sql:ro
+      # First-boot bootstrap: roles -> DDL -> grants -> seed (Section 8/13).
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Airflow --------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
+          --firstname admin --lastname admin --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: always
+
+  # --- Superset -------------------------------------------------------------
+  superset:
+    image: apache/superset:3.1.0
+    env_file: .env
+    environment: &superset-env
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    ports:
+      - "8088:8088"
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    restart: always
+    # Install the Postgres driver so Superset can query the warehouse, then serve.
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        pip install --no-cache-dir psycopg2-binary
+        gunicorn --bind 0.0.0.0:8088 --workers 2 --timeout 120 "superset.app:create_app()"
+
+  superset-init:
+    image: apache/superset:3.1.0
+    env_file: .env
+    environment: *superset-env
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        pip install --no-cache-dir psycopg2-binary
+        superset db upgrade
+        superset fab create-admin \
+          --username "$${SUPERSET_ADMIN_USERNAME:-admin}" \
+          --password "$${SUPERSET_ADMIN_PASSWORD:-admin}" \
+          --firstname admin --lastname admin \
+          --email "$${SUPERSET_ADMIN_EMAIL:-admin@example.com}" || true
+        superset init
+    restart: on-failure
+
+volumes:
+  pg_data:
+  etl_data:
+  superset_home:

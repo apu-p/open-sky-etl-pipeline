@@ -1,0 +1,27 @@
+# Secrets — the line that matters most. Never commit the real .env.
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Airflow local task logs (task data flows through Postgres, not here)
+logs/
+*.log
+
+# Raw / flat pipeline artifacts written to the shared volume
+data/raw/
+data/flat/
+
+# Bootstrapped schema-drift references (environment-specific)
+reference_schema/*.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local Claude Code settings (per-machine)
+.claude/settings.local.json

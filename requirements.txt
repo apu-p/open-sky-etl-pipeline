@@ -1,0 +1,6 @@
+# Runtime deps for the ETL layer. Installed into the Airflow image (see
+# docker-compose.yml). Deliberately tiny: NO Python DB driver (psycopg2 / ORM) —
+# all DB access is `psql` + COPY shelled out via subprocess (Section 11).
+requests==2.32.3
+pandas==2.2.2
+python-dotenv==1.0.1
