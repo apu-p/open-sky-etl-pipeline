@@ -25,16 +25,18 @@ NEOWS_SOURCE = "nasa_neows"
 
 
 def _daily_donki_window(end: date | None = None) -> tuple[date, date]:
-    """Rolling window for the daily DONKI pull (Section 7). One DONKI window
-    (<= 30 days) covers the recent past comfortably."""
+    """Rolling window for the daily DONKI pull (Section 7): 30 *inclusive* days
+    ([end-29, end]), so the request stays inside DONKI's 30-day cap and isn't
+    truncated. Covers the recent past comfortably."""
     end = end or date.today()
-    return end - timedelta(days=config.DONKI_WINDOW_DAYS), end
+    return end - timedelta(days=config.DONKI_WINDOW_DAYS - 1), end
 
 
 def _daily_neows_window(end: date | None = None) -> tuple[date, date]:
-    """Rolling 7-day window for the daily NeoWs pull (feed endpoint hard cap)."""
+    """Rolling 7-*inclusive*-day window for the daily NeoWs pull ([end-6, end]),
+    within the feed endpoint's hard cap."""
     end = end or date.today()
-    return end - timedelta(days=config.NEOWS_WINDOW_DAYS), end
+    return end - timedelta(days=config.NEOWS_WINDOW_DAYS - 1), end
 
 
 def extract_donki(

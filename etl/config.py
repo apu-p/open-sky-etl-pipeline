@@ -66,16 +66,25 @@ def backfill_range(today: date | None = None) -> tuple[date, date]:
     """(start, end) for the shared 2-year backfill window."""
     today = today or date.today()
     end = today - timedelta(days=BACKFILL_END_OFFSET_DAYS)
-    start = end.replace(year=end.year - BACKFILL_YEARS)
+    try:
+        start = end.replace(year=end.year - BACKFILL_YEARS)
+    except ValueError:
+        # end is Feb 29 and the target year isn't a leap year — clamp to Feb 28
+        # (end.replace(year=...) would otherwise raise on that one calendar day).
+        start = end.replace(year=end.year - BACKFILL_YEARS, day=28)
     return start, end
 
 
 def iter_windows(start: date, end: date, window_days: int):
     """Yield (window_start, window_end) covering [start, end] in per-request
-    windows no wider than a source's cap (DONKI 30d, NeoWs 7d — Section 2)."""
+    windows of at most ``window_days`` *inclusive* days (DONKI 30, NeoWs 7 —
+    Section 2). A window spans [ws, ws + window_days - 1], so its inclusive day
+    count never exceeds the source's cap — otherwise a 31st/8th day would push
+    the request past DONKI's 30-day limit (which truncates, silently dropping the
+    window's first day) or NeoWs's feed limit."""
     ws = start
     while ws <= end:
-        we = min(ws + timedelta(days=window_days), end)
+        we = min(ws + timedelta(days=window_days - 1), end)
         yield ws, we
         ws = we + timedelta(days=1)
 
