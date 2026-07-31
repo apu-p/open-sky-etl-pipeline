@@ -11,6 +11,9 @@ __pycache__/
 logs/
 *.log
 
+# Local full-stack run transcripts (diagnostic artifacts, not source)
+run_log.txt
+
 # Raw / flat pipeline artifacts written to the shared volume
 data/raw/
 data/flat/
