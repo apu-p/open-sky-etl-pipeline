@@ -57,16 +57,23 @@ services:
   # --- Airflow --------------------------------------------------------------
   airflow-init:
     <<: *airflow-common
+    # Runs as root only for this one-time chown: the Dockerfile ends USER
+    # airflow, but the etl_data named volume is fresh-created root:root on
+    # first boot, and nothing else in this stack owns fixing that up before
+    # the scheduler/webserver (running as AIRFLOW_UID) try to write into it.
+    user: "0:0"
     entrypoint: /bin/bash
     command:
       - -c
       - |
-        airflow db migrate
-        airflow users create \
-          --username "$${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
-          --password "$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
+        mkdir -p /opt/airflow/data
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/data
+        su airflow -c "airflow db migrate"
+        su airflow -c "airflow users create \
+          --username '$${_AIRFLOW_WWW_USER_USERNAME:-airflow}' \
+          --password '$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}' \
           --firstname admin --lastname admin --role Admin \
-          --email admin@example.com || true
+          --email admin@example.com" || true
     restart: on-failure
 
   airflow-scheduler:

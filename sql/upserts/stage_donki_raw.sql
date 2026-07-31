@@ -1,10 +1,13 @@
 -- Staging load (SCD Type 1) for DONKI space-weather events. Invoked as:
---   psql $ETL_DSN -v flat_file=<path> -f sql/upserts/stage_donki_raw.sql
+--   psql $ETL_DSN -f sql/upserts/stage_donki_raw.sql < <flat_file>
 -- Natural key: event_id (DONKI's own stable ID, unique across CME/GST/FLR).
+--
+-- Flat file piped in as PSTDIN, not a :'flat_file' variable — see
+-- stage_weather_raw.sql for why \copy can't reliably template its own path.
 
 CREATE TEMP TABLE donki_raw_incoming (LIKE staging.donki_raw INCLUDING DEFAULTS);
 
-\copy donki_raw_incoming FROM :'flat_file' WITH (FORMAT csv, DELIMITER '|');
+\copy donki_raw_incoming FROM PSTDIN WITH (FORMAT csv, DELIMITER '|')
 
 INSERT INTO staging.donki_raw
     (event_id, event_type, event_time, source_location, speed_kms, kp_index,

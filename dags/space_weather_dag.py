@@ -42,11 +42,11 @@ def space_weather_dag():
 
     # --- DONKI ---------------------------------------------------------------
     @task(retries=3, retry_exponential_backoff=True)
-    def extract_donki(run_id: str) -> list[dict]:
+    def extract_donki(pipeline_run_id: str) -> list[dict]:
         out = []
         try:
             for event_type in config.DONKI_EVENT_TYPES:
-                json_path, metrics = fetch_donki(event_type, pipeline_run_id=run_id)
+                json_path, metrics = fetch_donki(event_type, pipeline_run_id=pipeline_run_id)
                 out.append({"json_path": json_path, "metrics": metrics, "event_type": event_type})
         except CallFailed as exc:
             # Record the failed call (plus any successes so far) before failing
@@ -68,8 +68,8 @@ def space_weather_dag():
         return converted
 
     @task
-    def upsert_donki(_staged: dict, run_id: str) -> None:
-        loader.upsert_to_open_sky("space_weather_events.sql", run_id=run_id)
+    def upsert_donki(_staged: dict, pipeline_run_id: str) -> None:
+        loader.upsert_to_open_sky("space_weather_events.sql", run_id=pipeline_run_id)
 
     @task
     def log_metrics_donki(extracts: list[dict]) -> None:
@@ -77,9 +77,9 @@ def space_weather_dag():
 
     # --- NeoWs ---------------------------------------------------------------
     @task(retries=3, retry_exponential_backoff=True)
-    def extract_neows(run_id: str) -> dict:
+    def extract_neows(pipeline_run_id: str) -> dict:
         try:
-            json_path, metrics = fetch_neows(pipeline_run_id=run_id)
+            json_path, metrics = fetch_neows(pipeline_run_id=pipeline_run_id)
         except CallFailed as exc:
             loader.log_call_metrics([exc.metrics.as_row()])  # record the failure
             raise
@@ -97,8 +97,8 @@ def space_weather_dag():
         return converted
 
     @task
-    def upsert_neows(_staged: dict, run_id: str) -> None:
-        loader.upsert_to_open_sky("neo_close_approaches.sql", run_id=run_id)
+    def upsert_neows(_staged: dict, pipeline_run_id: str) -> None:
+        loader.upsert_to_open_sky("neo_close_approaches.sql", run_id=pipeline_run_id)
 
     @task
     def derive_asteroids(_upserted: None) -> None:
@@ -110,31 +110,31 @@ def space_weather_dag():
 
     # --- Audit (one per DAG) -------------------------------------------------
     @task(trigger_rule="all_done")
-    def run_audit_checks(run_id: str, donki_conv: dict, neows_conv: dict) -> None:
+    def run_audit_checks(donki_conv: dict, neows_conv: dict, pipeline_run_id: str) -> None:
         # Either convert output is None if its upstream failed (all_done still
         # fires this). Guard so the SQL checks (absence detection etc.) run.
         drift = {**(donki_conv or {}).get("raw", {}), **(neows_conv or {}).get("raw", {})}
-        findings = run_all_checks(run_id, drift)
+        findings = run_all_checks(pipeline_run_id, drift)
         loader.load_audit_findings(findings)
 
-    run_id = generate_run_id()
+    pipeline_run_id = generate_run_id()
 
     with TaskGroup("donki"):
-        d_ex = extract_donki(run_id)
+        d_ex = extract_donki(pipeline_run_id)
         d_conv = convert_donki_files(d_ex)
         d_stg = copy_donki_to_staging(d_conv)
-        d_ups = upsert_donki(d_stg, run_id)
+        d_ups = upsert_donki(d_stg, pipeline_run_id)
         d_met = log_metrics_donki(d_ex)
 
     with TaskGroup("neows"):
-        n_ex = extract_neows(run_id)
+        n_ex = extract_neows(pipeline_run_id)
         n_conv = convert_neows_files(n_ex)
         n_stg = copy_neows_to_staging(n_conv)
-        n_ups = upsert_neows(n_stg, run_id)
+        n_ups = upsert_neows(n_stg, pipeline_run_id)
         n_der = derive_asteroids(n_ups)
         n_met = log_metrics_neows(n_ex)
 
-    audit = run_audit_checks(run_id, d_conv, n_conv)
+    audit = run_audit_checks(d_conv, n_conv, pipeline_run_id)
     [d_ups, d_met, n_der, n_met] >> audit
 
 

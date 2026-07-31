@@ -6,9 +6,11 @@ Every psql call:
     the statement and psql exits non-zero -> the Airflow task fails -> alert
     fires (fail-fast, Section 6). Because the SCD upserts run inside a
     transaction, nothing partial lands.
-  * passes pipeline data (flat-file paths, run ids) as psql VARIABLES (-v), never
-    string-built into the command — the .sql files reference them via :'var'
-    with proper quoting (Section 4 principle).
+  * passes pipeline data as psql VARIABLES (-v) or via stdin, never string-built
+    into the command. Scalars (run ids) go in as -v vars, referenced in the
+    .sql files via :'var' with proper quoting (Section 4 principle). Flat-file
+    paths are piped in as psql's stdin instead (see _run_psql) rather than
+    templated into \\copy, which doesn't reliably interpolate :'var' itself.
 
 No I/O contract with the transform layer: this module only ever receives file
 paths (from XCom) and plain dicts (metrics/findings)."""
@@ -45,9 +47,18 @@ def _dsn() -> str:
     return dsn
 
 
-def _run_psql(args: Sequence[str], *, dsn: str | None = None) -> None:
+def _run_psql(args: Sequence[str], *, dsn: str | None = None, stdin_path: str | None = None) -> None:
     """Run psql with the given args as a list (no shell). Raises
-    CalledProcessError on non-zero exit, which fails the Airflow task."""
+    CalledProcessError on non-zero exit, which fails the Airflow task.
+
+    ``stdin_path``, if given, is opened and streamed in as psql's stdin — this
+    is how flat-file paths reach \\copy (the .sql files say ``FROM PSTDIN``).
+    psql's own \\copy argument parser does its own ad-hoc tokenizing of the
+    FROM/TO target that does NOT reliably apply psql's :'var' interpolation
+    (verified empirically: both :'flat_file' and :flat_file silently break the
+    WITH (...) options that follow), so the file path is never templated into
+    the .sql text at all — it's piped in as a real OS-level stdin stream
+    instead, which \\copy's PSTDIN keyword reads regardless of -f context."""
     cmd = [
         "psql", dsn or _dsn(),
         "-X",                      # ignore ~/.psqlrc
@@ -55,8 +66,12 @@ def _run_psql(args: Sequence[str], *, dsn: str | None = None) -> None:
         "-v", "ON_ERROR_STOP=1",   # fail fast: first error aborts, exit non-zero
         *args,
     ]
-    log.info("psql", extra={"context": {"args": list(args)}})
-    subprocess.run(cmd, check=True)
+    log.info("psql", extra={"context": {"args": list(args), "stdin_path": stdin_path}})
+    if stdin_path is not None:
+        with open(stdin_path, "rb") as stdin_file:
+            subprocess.run(cmd, check=True, stdin=stdin_file)
+    else:
+        subprocess.run(cmd, check=True)
 
 
 def copy_to_staging(flat_file_path: str, source: str) -> str:
@@ -64,8 +79,7 @@ def copy_to_staging(flat_file_path: str, source: str) -> str:
     upsert into staging.<source>_raw on the natural key. ``source`` is one of
     weather/donki/neows."""
     sql_file = STAGING_SQL[source]
-    _run_psql(["-v", f"flat_file={flat_file_path}",
-               "-f", config.sql_path("upserts", sql_file)])
+    _run_psql(["-f", config.sql_path("upserts", sql_file)], stdin_path=flat_file_path)
     return flat_file_path
 
 
@@ -99,8 +113,7 @@ def _copy_log(rows: list[dict[str, Any]], columns: list[str], sql_file: str, nam
         return
     flat_path = config.flat_dir("logs") / f"{name}_{utc_stamp()}.psv"
     write_psv(flat_path, columns, rows)
-    _run_psql(["-v", f"flat_file={flat_path}",
-               "-f", config.sql_path("upserts", sql_file)])
+    _run_psql(["-f", config.sql_path("upserts", sql_file)], stdin_path=str(flat_path))
 
 
 def log_call_metrics(metrics_rows: list[dict[str, Any]]) -> None:

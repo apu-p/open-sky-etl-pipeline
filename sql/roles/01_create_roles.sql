@@ -21,3 +21,13 @@ CREATE ROLE dba_app      LOGIN PASSWORD :'dba_app_password'      IN ROLE dba_rol
 CREATE ROLE etl_app      LOGIN PASSWORD :'etl_app_password'      IN ROLE etl_role;
 CREATE ROLE superset_app LOGIN PASSWORD :'superset_app_password' IN ROLE superset_role;
 CREATE ROLE dev_achu     LOGIN PASSWORD :'dev_achu_password'     IN ROLE developer_role;
+
+-- Postgres 15+ no longer grants CREATE on a database to PUBLIC by default, so
+-- dba_role (a non-owner, non-superuser role) needs it granted explicitly here
+-- --  while this script is still connected as the superuser -- otherwise
+-- 02_schemas_and_staging.sql's `SET ROLE dba_role; CREATE SCHEMA ...` fails
+-- with "permission denied for database".
+DO $$
+BEGIN
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO dba_role', current_database());
+END $$;
