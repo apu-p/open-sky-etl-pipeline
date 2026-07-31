@@ -48,13 +48,13 @@ def history_load_dag():
         return str(uuid.uuid4())
 
     @task
-    def backfill_weather(run_id: str) -> None:
+    def backfill_weather(pipeline_run_id: str) -> None:
         start, end = config.backfill_range()
         # Archive endpoint: one call per location covers the whole range.
         for loc in config.LOCATIONS:
             try:
                 json_path, metrics = fetch_open_meteo(
-                    loc, start_date=start, end_date=end, historical=True, pipeline_run_id=run_id)
+                    loc, start_date=start, end_date=end, historical=True, pipeline_run_id=pipeline_run_id)
             except CallFailed as exc:
                 loader.log_call_metrics([exc.metrics.as_row()])  # record the failed call
                 raise
@@ -63,13 +63,13 @@ def history_load_dag():
             loader.log_call_metrics([metrics])
 
     @task
-    def backfill_donki(run_id: str) -> None:
+    def backfill_donki(pipeline_run_id: str) -> None:
         start, end = config.backfill_range()
         for event_type in config.DONKI_EVENT_TYPES:
             for ws, we in config.iter_windows(start, end, config.DONKI_WINDOW_DAYS):
                 try:
                     json_path, metrics = fetch_donki(
-                        event_type, ws, we, historical=True, pipeline_run_id=run_id)
+                        event_type, ws, we, historical=True, pipeline_run_id=pipeline_run_id)
                 except CallFailed as exc:
                     loader.log_call_metrics([exc.metrics.as_row()])  # record the failed call
                     raise
@@ -78,11 +78,11 @@ def history_load_dag():
                 loader.log_call_metrics([metrics])
 
     @task
-    def backfill_neows(run_id: str) -> None:
+    def backfill_neows(pipeline_run_id: str) -> None:
         start, end = config.backfill_range()
         for ws, we in config.iter_windows(start, end, config.NEOWS_WINDOW_DAYS):
             try:
-                json_path, metrics = fetch_neows(ws, we, historical=True, pipeline_run_id=run_id)
+                json_path, metrics = fetch_neows(ws, we, historical=True, pipeline_run_id=pipeline_run_id)
             except CallFailed as exc:
                 loader.log_call_metrics([exc.metrics.as_row()])  # record the failed call
                 raise
@@ -91,18 +91,18 @@ def history_load_dag():
             loader.log_call_metrics([metrics])
 
     @task
-    def upsert_all_to_open_sky(run_id: str) -> None:
+    def upsert_all_to_open_sky(pipeline_run_id: str) -> None:
         # Runs once over everything staged (SCD2 historize + dimension derive).
-        loader.upsert_to_open_sky("weather_daily.sql", run_id=run_id)
-        loader.upsert_to_open_sky("space_weather_events.sql", run_id=run_id)
-        loader.upsert_to_open_sky("neo_close_approaches.sql", run_id=run_id)
+        loader.upsert_to_open_sky("weather_daily.sql", run_id=pipeline_run_id)
+        loader.upsert_to_open_sky("space_weather_events.sql", run_id=pipeline_run_id)
+        loader.upsert_to_open_sky("neo_close_approaches.sql", run_id=pipeline_run_id)
         loader.derive_asteroids()
 
-    run_id = generate_run_id()
-    bw = backfill_weather(run_id)
-    bd = backfill_donki(run_id)
-    bn = backfill_neows(run_id)
-    [bw, bd, bn] >> upsert_all_to_open_sky(run_id)
+    pipeline_run_id = generate_run_id()
+    bw = backfill_weather(pipeline_run_id)
+    bd = backfill_donki(pipeline_run_id)
+    bn = backfill_neows(pipeline_run_id)
+    [bw, bd, bn] >> upsert_all_to_open_sky(pipeline_run_id)
 
 
 history_load_dag()

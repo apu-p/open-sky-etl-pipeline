@@ -62,3 +62,14 @@ TO superset_role;
 REVOKE SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA staging       FROM dba_role;
 REVOKE SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA open_sky       FROM dba_role;
 REVOKE SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA open_sky_logs  FROM dba_role;
+
+-- Foreign-key enforcement is a trigger on the REFERENCING table, but Postgres
+-- checks the referenced table's row-lock ACL (SELECT + UPDATE) against the
+-- table OWNER, not the inserting role — verified empirically: with these two
+-- revoked from dba_role (owner of open_sky.locations), etl_role's own INSERT
+-- into weather_daily fails with "permission denied for table locations" even
+-- though etl_role itself holds SELECT/INSERT/UPDATE. locations is the only
+-- FK-referenced table in this schema (weather_daily_location_key_fkey), so
+-- this is the one narrow carve-out from "DDL-only" dba_role needs to keep FK
+-- enforcement working at all.
+GRANT SELECT, UPDATE ON open_sky.locations TO dba_role;

@@ -38,12 +38,12 @@ def weather_dag():
         return str(uuid.uuid4())
 
     @task(retries=3, retry_exponential_backoff=True)
-    def extract_open_meteo(run_id: str) -> list[dict]:
+    def extract_open_meteo(pipeline_run_id: str) -> list[dict]:
         # Writes raw JSON files (untouched) and returns [{json_path, metrics}].
         out = []
         try:
             for loc in config.LOCATIONS:
-                json_path, metrics = fetch_open_meteo(loc, pipeline_run_id=run_id)
+                json_path, metrics = fetch_open_meteo(loc, pipeline_run_id=pipeline_run_id)
                 out.append({"json_path": json_path, "metrics": metrics})
         except CallFailed as exc:
             # A failed call must still land in api_call_log — success rate and
@@ -68,30 +68,30 @@ def weather_dag():
         return converted
 
     @task
-    def upsert_to_open_sky(_staged: dict, run_id: str) -> None:
-        loader.upsert_to_open_sky("weather_daily.sql", run_id=run_id)
+    def upsert_to_open_sky(_staged: dict, pipeline_run_id: str) -> None:
+        loader.upsert_to_open_sky("weather_daily.sql", run_id=pipeline_run_id)
 
     @task
     def log_call_metrics(extracts: list[dict]) -> None:
         loader.log_call_metrics([e["metrics"] for e in extracts])
 
     @task(trigger_rule="all_done")  # audit even if the load failed
-    def run_audit_checks(run_id: str, converted: dict) -> None:
+    def run_audit_checks(converted: dict, pipeline_run_id: str) -> None:
         # converted is None if convert_to_flat_file failed (all_done still fires
         # this task). Guard so the SQL checks — absence detection especially,
         # which is the whole point when a load failed — still run.
         raw_paths = (converted or {}).get("raw_paths", [])
         drift = {"open_meteo": raw_paths[0]} if raw_paths else {}
-        findings = run_all_checks(run_id, drift)
+        findings = run_all_checks(pipeline_run_id, drift)
         loader.load_audit_findings(findings)
 
-    run_id = generate_run_id()
-    extracts = extract_open_meteo(run_id)
+    pipeline_run_id = generate_run_id()
+    extracts = extract_open_meteo(pipeline_run_id)
     converted = convert_to_flat_file(extracts)
     staged = copy_to_staging(converted)
-    upserted = upsert_to_open_sky(staged, run_id)
+    upserted = upsert_to_open_sky(staged, pipeline_run_id)
     metrics_done = log_call_metrics(extracts)
-    audit = run_audit_checks(run_id, converted)
+    audit = run_audit_checks(converted, pipeline_run_id)
     [upserted, metrics_done] >> audit
 
 
